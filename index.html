@@ -1,1 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic UFOV-MOT Fusion</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        canvas { touch-action: none; }
+    </style>
+</head>
+<body class="bg-slate-950 flex flex-col items-center justify-center min-h-screen p-4 font-sans text-white">
 
+    <div class="mb-4 text-center">
+        <h1 class="text-3xl font-bold">Dynamic UFOV-MOT Fusion</h1>
+        <p class="text-slate-400">Current Speed Level: <span id="speedDisplay">2.0</span></p>
+    </div>
+
+    <!-- Game Area -->
+    <div class="relative border-4 border-slate-700 bg-slate-900 rounded-xl overflow-hidden shadow-2xl">
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        
+        <!-- Central UFOV Symbol -->
+        <div id="ufovContainer" class="absolute inset-0 flex items-center justify-center pointer-events-none hidden">
+            <span id="ufovSymbol" class="text-6xl font-bold text-white drop-shadow-[0_0_15px_rgba(255,255,255,1)]">✚</span>
+        </div>
+
+        <!-- Start Overlay -->
+        <div id="startOverlay" class="absolute inset-0 flex items-center justify-center bg-black/70">
+            <button id="startBtn" class="px-8 py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-500 transition-colors">
+                Start Trial
+            </button>
+        </div>
+
+        <!-- Feedback Overlay -->
+        <div id="feedbackOverlay" class="absolute inset-0 flex flex-col items-center justify-center bg-black/80 text-white gap-4 hidden">
+            <h2 id="feedbackMsg" class="text-2xl font-bold"></h2>
+            <button id="nextTrialBtn" class="px-8 py-3 bg-green-600 font-bold rounded-lg hover:bg-green-500 transition-colors">
+                Next Trial
+            </button>
+        </div>
+    </div>
+
+    <!-- Resolution UI (Double Decision) -->
+    <div id="resolutionUI" class="mt-6 w-[800px] bg-slate-800 p-6 rounded-xl border border-slate-700 text-white hidden">
+        <h3 class="text-xl font-bold mb-2">Double Decision Required:</h3>
+        <p class="mb-4 text-slate-300">1. Click the <span class="font-bold text-orange-400">4 target spheres</span> on the canvas.<br/>2. Select the <span class="font-bold text-white">final 3 symbols</span> you saw in the center.</p>
+        
+        <div id="mcqContainer" class="flex gap-4 mb-6"></div>
+
+        <button id="submitBtn" disabled class="w-full py-3 bg-emerald-600 text-white font-bold rounded-lg hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            Submit Answer
+        </button>
+    </div>
+
+    <script>
+        // Configuration
+        const WIDTH = 800;
+        const HEIGHT = 600;
+        const RADIUS = 25;
+        const NUM_TARGETS = 4;
+        const NUM_DISTRACTORS = 4;
+        const SYMBOLS = ["🚀", "🦁", "🍕", "⚡", "🍄", "💎", "🎸", "🧩"];
+        
+        // Game State
+        let phase = 'IDLE'; // IDLE, HIGHLIGHT, TRACKING, RESOLUTION, FEEDBACK
+        let speed = 2.0;
+        let spheres = [];
+        let targetSequence = [];
+        let mcqOptions = [];
+        let selectedSequenceIdx = null;
+        let ufovInterval = null;
+        let animationFrame = null;
+
+        // DOM Elements
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const speedDisplay = document.getElementById('speedDisplay');
+        const ufovContainer = document.getElementById('ufovContainer');
+        const ufovSymbol = document.getElementById('ufovSymbol');
+        const startOverlay = document.getElementById('startOverlay');
+        const startBtn = document.getElementById('startBtn');
+        const feedbackOverlay = document.getElementById('feedbackOverlay');
+        const feedbackMsg = document.getElementById('feedbackMsg');
+        const nextTrialBtn = document.getElementById('nextTrialBtn');
+        const resolutionUI = document.getElementById('resolutionUI');
+        const mcqContainer = document.getElementById('mcqContainer');
+        const submitBtn = document.getElementById('submitBtn');
+
+        // Initialize Physics
+        function initSpheres() {
+            spheres = [];
+            const total = NUM_TARGETS + NUM_DISTRACTORS;
+            for (let i = 0; i < total; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                spheres.push({
+                    id: i,
+                    x: RADIUS * 2 + Math.random() * (WIDTH - RADIUS * 4),
+                    y: RADIUS * 2 + Math.random() * (HEIGHT - RADIUS * 4),
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    radius: RADIUS,
+                    isTarget: i < NUM_TARGETS,
+                    selected: false,
+                });
+            }
+        }
+
+        function updatePhysics() {
+            for (let s of spheres) {
+                s.x += s.vx; s.y += s.vy;
+                if (s.x - s.radius <= 0) { s.x = s.radius; s.vx *= -1; }
+                if (s.x + s.radius >= WIDTH) { s.x = WIDTH - s.radius; s.vx *= -1; }
+                if (s.y - s.radius <= 0) { s.y = s.radius; s.vy *= -1; }
+                if (s.y + s.radius >= HEIGHT) { s.y = HEIGHT - s.radius; s.vy *= -1; }
+            }
+            
+            // Elastic Collisions
+            for (let i = 0; i < spheres.length; i++) {
+                for (let j = i + 1; j < spheres.length; j++) {
+                    let s1 = spheres[i], s2 = spheres[j];
+                    let dx = s2.x - s1.x, dy = s2.y - s1.y;
+                    let dist = Math.sqrt(dx * dx + dy * dy);
+                    let minDist = s1.radius + s2.radius;
+                    
+                    if (dist < minDist) {
+                        let overlap = minDist - dist;
+                        let nx = dx / dist, ny = dy / dist;
+                        s1.x -= nx * (overlap / 2); s1.y -= ny * (overlap / 2);
+                        s2.x += nx * (overlap / 2); s2.y += ny * (overlap / 2);
+                        
+                        let kx = s1.vx - s2.vx, ky = s1.vy - s2.vy;
+                        let p = (nx * kx + ny * ky);
+                        s1.vx -= p * nx; s1.vy -= p * ny;
+                        s2.vx += p * nx; s2.vy += p * ny;
+                    }
+                }
+            }
+        }
+
+        // Render Loop
+        function render() {
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+            
+            if (phase === 'TRACKING') updatePhysics();
+
+            spheres.forEach(s => {
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+                
+                if (phase === 'HIGHLIGHT' && s.isTarget) {
+                    ctx.fillStyle = '#f97316'; // Orange
+                } else if (phase === 'RESOLUTION' && s.selected) {
+                    ctx.fillStyle = '#3b82f6'; // Blue
+                } else {
+                    ctx.fillStyle = '#94a3b8'; // Grey
+                }
+                
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+                ctx.closePath();
+            });
+
+            if (phase !== 'IDLE' && phase !== 'FEEDBACK') {
+                animationFrame = requestAnimationFrame(render);
+            }
+        }
+
+        // Generate Multiple Choice
+        function generateMCQ() {
+            let options = [targetSequence];
+            while (options.length < 4) {
+                let wrong = [
+                    SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)],
+                    SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)],
+                    SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)]
+                ];
+                if (wrong.join('') !== targetSequence.join('')) {
+                    options.push(wrong);
+                }
+            }
+            options.sort(() => Math.random() - 0.5); // Shuffle
+            mcqOptions = options;
+            
+            mcqContainer.innerHTML = '';
+            mcqOptions.forEach((opt, idx) => {
+                const btn = document.createElement('button');
+                btn.className = 'flex-1 py-3 text-2xl rounded-lg border-2 bg-slate-700 border-slate-600 hover:bg-slate-600 transition-colors';
+                btn.innerText = opt.join(' ');
+                btn.onclick = () => selectMCQ(idx, btn);
+                mcqContainer.appendChild(btn);
+            });
+        }
+
+        function selectMCQ(idx, clickedBtn) {
+            selectedSequenceIdx = idx;
+            submitBtn.disabled = false;
+            
+            Array.from(mcqContainer.children).forEach(btn => {
+                btn.classList.remove('bg-blue-600', 'border-blue-400');
+                btn.classList.add('bg-slate-700', 'border-slate-600');
+            });
+            clickedBtn.classList.remove('bg-slate-700', 'border-slate-600');
+            clickedBtn.classList.add('bg-blue-600', 'border-blue-400');
+        }
+
+        // Canvas Click Handling
+        canvas.addEventListener('click', (e) => {
+            if (phase !== 'RESOLUTION') return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            spheres.forEach(s => {
+                const dx = s.x - x; const dy = s.y - y;
+                if (Math.sqrt(dx * dx + dy * dy) <= s.radius) {
+                    s.selected = !s.selected;
+                }
+            });
+        });
+
+        // Game Flow Methods
+        function startTrial() {
+            startOverlay.classList.add('hidden');
+            feedbackOverlay.classList.add('hidden');
+            resolutionUI.classList.add('hidden');
+            canvas.style.cursor = 'default';
+            
+            speedDisplay.innerText = speed.toFixed(1);
+            initSpheres();
+            phase = 'HIGHLIGHT';
+            targetSequence = [];
+            selectedSequenceIdx = null;
+            submitBtn.disabled = true;
+            ufovSymbol.innerText = "✚";
+            
+            cancelAnimationFrame(animationFrame);
+            render();
+
+            setTimeout(() => {
+                phase = 'TRACKING';
+                ufovContainer.classList.remove('hidden');
+                
+                let tempSeq = [];
+                ufovInterval = setInterval(() => {
+                    const next = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+                    ufovSymbol.innerText = next;
+                    tempSeq.push(next);
+                    if (tempSeq.length > 3) tempSeq.shift();
+                    targetSequence = [...tempSeq];
+                }, 800);
+
+            }, 2000); // 2s Highlight
+
+            setTimeout(() => {
+                phase = 'RESOLUTION';
+                clearInterval(ufovInterval);
+                ufovContainer.classList.add('hidden');
+                resolutionUI.classList.remove('hidden');
+                canvas.style.cursor = 'pointer';
+                generateMCQ();
+            }, 10000); // 8s Tracking (10s total)
+        }
+
+        function submitAnswer() {
+            const selectedSpheres = spheres.filter(s => s.selected);
+            const correctSpheres = selectedSpheres.filter(s => s.isTarget).length;
+            const seqCorrect = mcqOptions[selectedSequenceIdx].join('') === targetSequence.join('');
+
+            const isPerfect = correctSpheres === NUM_TARGETS && selectedSpheres.length === NUM_TARGETS && seqCorrect;
+
+            if (isPerfect) {
+                feedbackMsg.innerText = "Perfect! Increasing speed.";
+                feedbackMsg.className = "text-2xl font-bold text-green-400";
+                speed += 0.5;
+            } else {
+                feedbackMsg.innerText = `Incorrect. ${correctSpheres}/${NUM_TARGETS} targets. Sequence: ${seqCorrect ? 'Right' : 'Wrong'}.`;
+                feedbackMsg.className = "text-2xl font-bold text-red-400";
+                speed = Math.max(1.0, speed - 0.5);
+            }
+            
+            phase = 'FEEDBACK';
+            resolutionUI.classList.add('hidden');
+            feedbackOverlay.classList.remove('hidden');
+        }
+
+        // Event Listeners
+        startBtn.addEventListener('click', startTrial);
+        nextTrialBtn.addEventListener('click', startTrial);
+        submitBtn.addEventListener('click', submitAnswer);
+
+    </script>
+</body>
+</html>
